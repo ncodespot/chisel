@@ -66,17 +66,27 @@ func (u *udpListener) run(ctx context.Context) error {
 	defer u.inbound.Close()
 	//udp doesnt accept connections,
 	//udp simply forwards packets
-	//and therefore only needs to listen
-	eg, ctx := errgroup.WithContext(ctx)
-	eg.Go(func() error {
-		return u.runInbound(ctx)
-	})
-	eg.Go(func() error {
-		return u.runOutbound(ctx)
-	})
-	if err := eg.Wait(); err != nil {
-		u.Debugf("listen: %s", err)
-		return err
+	//and therefore only needs to listen.
+	//if the ssh connection drops, clear the cached channel and retry so that
+	//the proxy recovers when ssh reconnects, rather than propagating the error
+	//up and killing the entire client.
+	for {
+		eg, egCtx := errgroup.WithContext(ctx)
+		eg.Go(func() error {
+			return u.runInbound(egCtx)
+		})
+		eg.Go(func() error {
+			return u.runOutbound(egCtx)
+		})
+		if err := eg.Wait(); err != nil && !isDone(ctx) {
+			u.Debugf("listen: %s", err)
+			//clear the cached ssh channel so the next iteration opens a fresh one
+			u.outboundMut.Lock()
+			u.outbound = nil
+			u.outboundMut.Unlock()
+			continue
+		}
+		break
 	}
 	u.Debugf("Close (sent %s received %s)", sizestr.ToString(u.sent), sizestr.ToString(u.recv))
 	return nil
